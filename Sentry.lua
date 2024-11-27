@@ -338,6 +338,8 @@ function Sentry:Fire()
 		local damageOptions = Table.DeepCopy(self.settings.Damage)
 		damageOptions.Dealer = self.ownerVal.Value
 		damageOptions.Taker = result.Instance
+		damageOptions.Distance = { Distance = result.Distance }
+		damageOptions.Metadata = { IgnoreState = true } -- ! TODO: REDO
 		Damage.damage(damageOptions)
 		local takerConfig = damageOptions.TakerInfo.Config
 		if takerConfig and takerConfig.Health <= 0 then
@@ -461,7 +463,12 @@ function Sentry:GetNearbyEnemyRoots(range)
 			continue
 		end
 		if
-			owner and not Damage.canDamage({ Dealer = owner, Taker = player })
+			owner
+			and not Damage.canDamage({
+				Dealer = owner,
+				Taker = player,
+				Metadata = { IgnoreState = true }, -- ! TODO: FIX
+			})
 		then
 			continue
 		end
