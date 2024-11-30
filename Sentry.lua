@@ -284,10 +284,14 @@ function Sentry:StartFire()
 		task.spawn(function()
 			local lastSentRate = nil
 			while self.target and currentTarget == self.target do
-				if currentRate ~= lastSentRate then
-					lastSentRate = currentRate
-					self.gatlingEvent:FireAllClients(currentRate)
+				if not self.target.Parent then
+					break
 				end
+				if currentRate == lastSentRate then
+					break
+				end
+				lastSentRate = currentRate
+				self.gatlingEvent:FireAllClients(currentRate)
 				task.wait(currentRate)
 			end
 			self.main.Spin:Stop()
@@ -305,6 +309,9 @@ function Sentry:StartFire()
 				and currentTarget == self.target
 				and self.lastFireId == thisFireId
 			do
+				if not self.target.Parent then
+					break
+				end
 				self:Fire()
 				task.wait(self.settings.Sentry.FireRate)
 			end
@@ -495,7 +502,7 @@ function Sentry:CanSee(hrp): boolean
 		self.searchParams
 	) or {}
 	local instance = result.Instance
-	if not instance then
+	if not instance or not instance.CanCollide then
 		return false
 	end
 	local isDamageable = CollectionService:HasTag(
