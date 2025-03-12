@@ -1,21 +1,20 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 local CollectionService = game:GetService("CollectionService")
-local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local Modules = ReplicatedStorage.Modules
 
 local Logging = require(Modules.Mega.Logging)
-local Replication = require(Modules.Mega.Replication)
-local MiscUtils = require(Modules.Mega.Utils.Misc)
-local PlayerUtils = require(Modules.Mega.Utils.Player)
 local LiveConfig = require(Modules.Mega.Data.LiveConfig)
 local Table = require(Modules.Mega.DataStructures.Table)
 local InstModify = require(Modules.Mega.Instances.Modify)
 local InstSearch = require(Modules.Mega.Instances.Search)
 local SpaceUtils = require(Modules.Mega.Utils.Space)
 local Damage = require(Modules.Damage.Damage)
+
+local assets = RunService:IsServer() and ServerStorage.Assets.Sentries
 
 local LOG = Logging:new("Sentries")
 
@@ -34,7 +33,7 @@ export type Sentry = typeof(setmetatable({}, Sentry))
 
 function Sentry:new(model: Model, owner: Player?)
 	-- Create a new sentry object
-	local self = setmetatable({}, { __index = Sentry })
+	self = setmetatable({}, { __index = Sentry })
 	self.settings = require(model.Settings)
 	self.model = model
 	self.main = model.Main
@@ -72,7 +71,9 @@ function Sentry:new(model: Model, owner: Player?)
 	self:_SetupHealth()
 
 	-- Ownership
-	self:SetOwner(owner)
+	if not self.ownerVal.Value then
+		self:SetOwner(owner)
+	end
 	self:SetTeam(self.settings.Sentry.Team)
 
 	-- Firing
@@ -94,40 +95,46 @@ function Sentry:_SetupModel()
 	CollectionService:AddTag(self.model, "Sentry")
 
 	-- General
-	self.scriptFolder =
-		InstModify.create("Folder", self.model, { Name = "Scripting" })
+	self.scriptFolder = InstModify.create("Folder", self.model, { Name = "Scripting" })
 	self.prompt = InstModify.create("ProximityPrompt", self.main)
-	self.targetVal =
-		InstModify.create("ObjectValue", self.model, { Name = "Target" })
-	self.teamVal =
-		InstModify.create("ObjectValue", self.model, { Name = "Team" })
-	self.ownerVal =
-		InstModify.create("ObjectValue", self.model, { Name = "Owner" })
+	self.targetVal = InstModify.create("ObjectValue", self.model, { Name = "Target" })
+	self.teamVal = InstModify.create("ObjectValue", self.model, { Name = "Team" })
+
+	-- Get owner value object, may already have been created
+	-- by a utility function
+	self.ownerVal = InstModify.findOrCreateChild(
+		self.model,
+		"Owner",
+		"ObjectValue",
+		{ Name = "Owner" }
+	)
 
 	-- Ui
-	self.healthUi = game.ServerStorage.Assets.Sentries.HealthBar:Clone()
-	self.repairUi = game.ServerStorage.Assets.Sentries.RepairUi:Clone()
+	local uiAssets = assets:FindFirstChild("Ui") or assets
+	self.healthUi = uiAssets.HealthBar:Clone()
+	self.repairUi = uiAssets.RepairUi:Clone()
 	self.repairUi.Parent = self.main
 	self.healthUi.Parent = self.model
 
 	-- Effects
-	local effects = Table:new(ServerStorage.Assets.Sentries:GetChildren())
-		:Filter(function(v)
+	local effects
+	if assets:FindFirstChild("Effects") then
+		effects = assets.Effects:GetChildren()
+	else
+		-- Legacy
+		effects = Table:new(assets:GetChildren())
+		effects:Filter(function(v)
 			return v:IsA("ParticleEmitter") or v:IsA("Sound")
 		end)
+	end
+
 	InstModify.cloneMany(effects, self.main)
 
 	-- Events
-	self.orientEvent = InstModify.create(
-		"RemoteEvent",
-		self.scriptFolder,
-		{ Name = "OrientEvent" }
-	)
-	self.gatlingEvent = InstModify.create(
-		"RemoteEvent",
-		self.scriptFolder,
-		{ Name = "GatlingEvent" }
-	)
+	self.orientEvent =
+		InstModify.create("RemoteEvent", self.scriptFolder, { Name = "OrientEvent" })
+	self.gatlingEvent =
+		InstModify.create("RemoteEvent", self.scriptFolder, { Name = "GatlingEvent" })
 
 	-- Save initial barrel weld position
 	if self.model:FindFirstChild("Barrel") then
@@ -162,6 +169,7 @@ function Sentry:_SetupHealth()
 
 	-- Health change
 	config.Health = self.settings.Sentry.Health
+	config.MaxHealth = self.settings.Sentry.MaxHealth
 	onHealthChange(config.Health)
 	config:Watch("Health", onHealthChange)
 
@@ -334,11 +342,8 @@ function Sentry:Fire()
 		return
 	end
 	local startPos = self.firePoint.WorldCFrame.Position
-	local result: RaycastResult = SpaceUtils.castLineRay(
-		startPos,
-		self.target.Position,
-		self.searchParams
-	)
+	local result: RaycastResult =
+		SpaceUtils.castLineRay(startPos, self.target.Position, self.searchParams)
 	self.currentAmmo -= 1
 	self:FireEffects()
 	if result then
@@ -374,9 +379,8 @@ function Sentry:FireEffects()
 	-- Bullet
 	local emitter = self.firePoint.Bullet
 	local speed = 3500 / 3
-	local lifetime = (
-		self.firePoint.WorldCFrame.Position - self.target.Position
-	).Magnitude / speed
+	local lifetime = (self.firePoint.WorldCFrame.Position - self.target.Position).Magnitude
+		/ speed
 	emitter.Speed = NumberRange.new(speed, speed)
 	emitter.Lifetime = NumberRange.new(lifetime, lifetime)
 	emitter:Emit(1)
@@ -405,26 +409,19 @@ function Sentry:FireEffects()
 	local barrel = self.model:FindFirstChild("Barrel")
 	if self.settings.Sentry.OffsetBarrelStuds > 0 and barrel then
 		spawn(function()
-			local tweenInfo = TweenInfo.new(
-				self.settings.Sentry.FireRate / 4,
-				Enum.EasingStyle.Cubic
-			)
-			local offset =
-				Vector3.new(self.settings.Sentry.OffsetBarrelStuds, 0, 0)
+			local tweenInfo =
+				TweenInfo.new(self.settings.Sentry.FireRate / 4, Enum.EasingStyle.Cubic)
+			local offset = Vector3.new(self.settings.Sentry.OffsetBarrelStuds, 0, 0)
 			if self.settings.Sentry.ZOffset then
-				offset =
-					Vector3.new(0, 0, self.settings.Sentry.OffsetBarrelStuds)
+				offset = Vector3.new(0, 0, self.settings.Sentry.OffsetBarrelStuds)
 			end
 			local tween1 = TweenService:Create(
 				barrel.Weld,
 				tweenInfo,
 				{ C0 = barrel.Weld.C0 - offset }
 			)
-			local tween2 = TweenService:Create(
-				barrel.Weld,
-				tweenInfo,
-				{ C0 = barrel.Weld.C0 }
-			)
+			local tween2 =
+				TweenService:Create(barrel.Weld, tweenInfo, { C0 = barrel.Weld.C0 })
 			tween1:Play()
 			tween1.Completed:Wait()
 			tween2:Play()
@@ -460,10 +457,8 @@ function Sentry:GetNearbyEnemyRoots(range)
 	local team: Team = self.teamVal.Value
 	local owner = self.ownerVal.Value
 	local nearby = {}
-	local players = Table.Difference(
-		Players:GetPlayers(),
-		team and team:GetPlayers() or {}
-	)
+	local players =
+		Table.Difference(Players:GetPlayers(), team and team:GetPlayers() or {})
 	for _, player: Player in players do
 		local distance = player:DistanceFromCharacter(self.main.Position)
 		if distance <= 0 or distance > range then
@@ -482,13 +477,9 @@ function Sentry:GetNearbyEnemyRoots(range)
 
 		-- Set as nearby
 		local character = player.Character
-		local hrp = character.HumanoidRootPart
 		local humanoid = character.Humanoid
 		if humanoid.Health > 0 then
-			table.insert(
-				nearby,
-				player.Character:FindFirstChild("HumanoidRootPart")
-			)
+			table.insert(nearby, player.Character:FindFirstChild("HumanoidRootPart"))
 		end
 	end
 	return nearby
@@ -496,13 +487,14 @@ end
 
 function Sentry:CanSee(hrp): boolean
 	local startPos = self.firePoint.WorldCFrame.Position
-	local result = SpaceUtils.castLineRay(
-		startPos,
-		hrp.Position,
-		self.searchParams
-	) or {}
+	local result = SpaceUtils.castLineRay(startPos, hrp.Position, self.searchParams)
+		or {}
 	local instance = result.Instance
 	if not instance or not instance.CanCollide then
+		return false
+	end
+	local distance = (hrp.Position - self.main.Position).Magnitude + 30
+	if distance > self.settings.Sentry.Range then
 		return false
 	end
 	local isDamageable = CollectionService:HasTag(
@@ -536,7 +528,6 @@ end
 
 -- =============== Private ==============
 
--- Persistent Streaming
 --[[
 	
 	Persistent streaming only
@@ -567,8 +558,7 @@ function Sentry.clientSetup(model: Model)
 	local function target(currentTarget)
 		task.spawn(function()
 			while targetVal.Value == currentTarget and config.Enabled do
-				local cframe =
-					CFrame.new(main.CFrame.Position, currentTarget.Position)
+				local cframe = CFrame.new(main.CFrame.Position, currentTarget.Position)
 				orient(cframe, sentrySettings.LockOnSpeed)
 				task.wait(0.1)
 			end
@@ -582,10 +572,7 @@ function Sentry.clientSetup(model: Model)
 				main.Servo:Play()
 				local randPos = Vector3.new(
 					math.random(-1000, 1000),
-					math.random(
-						sentrySettings.WanderYMin,
-						sentrySettings.WanderYMax
-					),
+					math.random(sentrySettings.WanderYMin, sentrySettings.WanderYMax),
 					math.random(-1000, 1000)
 				)
 				local cframe = CFrame.new(main.CFrame.Position, randPos)
@@ -602,7 +589,6 @@ function Sentry.clientSetup(model: Model)
 	end
 
 	local function disable()
-		local light = model.Light
 		main.Explode:Emit(15)
 		main.Smoke.Enabled = true
 		main.Disable:Play()
@@ -613,10 +599,7 @@ function Sentry.clientSetup(model: Model)
 			main.Parent:GetPivot().Y - 1000,
 			math.random(-1000, 1000)
 		)
-		orient(
-			CFrame.new(main.CFrame.Position, pos),
-			sentrySettings.WanderSpeed
-		)
+		orient(CFrame.new(main.CFrame.Position, pos), sentrySettings.WanderSpeed)
 	end
 
 	local function onTargetChange()
@@ -672,11 +655,8 @@ function Sentry.clientSetup(model: Model)
 					)
 				local tweenInfo =
 					TweenInfo.new(currentRate / 1.5, Enum.EasingStyle.Linear)
-				local tween = TweenService:Create(
-					gatling.Weld,
-					tweenInfo,
-					{ C1 = newCFrame }
-				)
+				local tween =
+					TweenService:Create(gatling.Weld, tweenInfo, { C1 = newCFrame })
 				tween:Play()
 				task.wait(0.1)
 			end
