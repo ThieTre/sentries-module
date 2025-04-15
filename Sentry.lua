@@ -16,7 +16,7 @@ local Damage = require(Modules.Damage.Damage)
 
 local assets = RunService:IsServer() and ServerStorage.Assets.Sentries
 
-local LOG = Logging:new("Sentries")
+local LOG = Logging:new("Sentries.Sentry")
 
 -----------------------------------------------------------
 --------------------- Sentry Object ------------------------
@@ -71,7 +71,7 @@ function Sentry:new(model: Model, owner: Player?)
 	self:_SetupHealth()
 
 	-- Ownership
-	if not self.ownerVal.Value then
+	if not self.ownerVal.Value and owner then
 		self:SetOwner(owner)
 	end
 	self:SetTeam(self.settings.Sentry.Team)
@@ -257,6 +257,7 @@ end
 
 function Sentry:SetOwner(player: Player?)
 	self.ownerVal.Value = player
+	self.teamVal.Value = player.Team
 	self:SetTarget(nil)
 end
 
