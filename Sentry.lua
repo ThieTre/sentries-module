@@ -349,7 +349,7 @@ function Sentry:Fire()
 	self:FireEffects()
 	if result then
 		local damageOptions = Table.DeepCopy(self.settings.Damage)
-		damageOptions.Dealer = self.ownerVal.Value
+		damageOptions.Dealer = self.ownerVal.Value or self.model
 		damageOptions.Taker = result.Instance
 		damageOptions.Distance = { Distance = result.Distance }
 		damageOptions.Metadata = { IgnoreState = true } -- ! TODO: REDO
