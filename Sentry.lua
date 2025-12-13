@@ -11,11 +11,14 @@ local LiveConfig = require(Modules.Mega.Data.LiveConfig)
 local Table = require(Modules.Mega.DataStructures.Table)
 local InstModify = require(Modules.Mega.Instances.Modify)
 local InstSearch = require(Modules.Mega.Instances.Search)
+local EffectsManager = require(Modules.Mega.Utils.EffectsManager)
 local SpaceUtils = require(Modules.Mega.Utils.Space)
+local PlayerUtils = require(Modules.Mega.Utils.Player)
 local Damage = require(Modules.Damage.Damage)
 
 local assets = RunService:IsServer() and ServerStorage.Assets.Sentries
 
+local SETTINGS = require(ReplicatedStorage.Settings.Sentries)
 local LOG = Logging:new("Sentries.Sentry")
 
 -----------------------------------------------------------
@@ -41,6 +44,7 @@ function Sentry:new(model: Model, owner: Player?)
 	self.config = LiveConfig:new(self.model)
 	self.target = nil
 	self.config.Enabled = false
+	self.effectsManager = EffectsManager:new(model:GetDescendants())
 
 	-- Initial model setup if needed
 	self.scriptFolder = model:FindFirstChild("Scripting")
@@ -91,8 +95,7 @@ end
 -- =============== General Setup ==============
 
 function Sentry:_SetupModel()
-	CollectionService:AddTag(self.model, "Damageable")
-	CollectionService:AddTag(self.model, "Sentry")
+	CollectionService:AddTag(self.model, "sentry")
 
 	-- General
 	self.scriptFolder = InstModify.create("Folder", self.model, { Name = "Scripting" })
@@ -116,19 +119,11 @@ function Sentry:_SetupModel()
 	self.repairUi.Parent = self.main
 	self.healthUi.Parent = self.model
 
-	-- Effects
-	local effects
-	if assets:FindFirstChild("Effects") then
-		effects = assets.Effects:GetChildren()
-	else
-		-- Legacy
-		effects = Table:new(assets:GetChildren())
-		effects:Filter(function(v)
-			return v:IsA("ParticleEmitter") or v:IsA("Sound")
-		end)
+	if SETTINGS.EnemyIcon then
+		InstModify.clone(SETTINGS.EnemyIcon, self.model, {
+			MaxDistance = self.settings.Sentry.Range * 1.5,
+		})
 	end
-
-	InstModify.cloneMany(effects, self.main)
 
 	-- Events
 	self.orientEvent =
@@ -198,6 +193,8 @@ function Sentry:Enable()
 	end
 	self.config.Enabled = true
 
+	self.model:AddTag("Damageable")
+
 	task.spawn(function()
 		while self.config.Enabled do
 			task.spawn(function()
@@ -213,42 +210,42 @@ function Sentry:Disable()
 	if self.settings.Sentry.PromptRevive then
 		self.prompt.Enabled = true
 	end
+	self.model:RemoveTag("Damageable")
 	self.config.Enabled = false
 	self:SetTarget(nil)
 	local light = self.model.Light
-	if self.settings.Sentry.ReviveTime then
-		spawn(function()
-			local downCount = 0
-			while not self.config.Enabled do
-				self.repairUi.Enabled = true
-				light.SpotLight.Enabled = true
-				task.wait(0.5)
-				self.repairUi.Enabled = false
-				light.SpotLight.Enabled = false
-				task.wait(0.5)
-				downCount += 1
-				if
-					downCount >= self.settings.Sentry.ReviveTime
-					and not self.config.Enabled
-				then
-					self:Enable()
-					self.config.Health = self.settings.Sentry.Health / 2
+	if self.config.Health <= 0 and self.settings.Sentry.ReviveTime then
+		if self.settings.Sentry.ReviveTime then
+			task.spawn(function()
+				local downCount = 0
+				while not self.config.Enabled do
+					self.repairUi.Enabled = true
+					light.SpotLight.Enabled = true
+					task.wait(0.5)
+					self.repairUi.Enabled = false
+					light.SpotLight.Enabled = false
+					task.wait(0.5)
+					downCount += 1
+					if
+						downCount >= self.settings.Sentry.ReviveTime
+						and not self.config.Enabled
+					then
+						self:Enable()
+						self.config.Health = self.settings.Sentry.Health / 2
+					end
 				end
-			end
-			light.SpotLight.Enabled = true
-			self.repairUi.Enabled = false
-		end)
+				light.SpotLight.Enabled = true
+				self.repairUi.Enabled = false
+			end)
+		end
 	end
 end
 
 function Sentry:Idle()
-	local light = self.model.Light
-	local main = self.main
-	light.BrickColor = BrickColor.new("Lime green")
-	light.SpotLight.Color = Color3.new(0, 1, 0)
-	main.Loss:Play()
-	main.Warning:Stop()
-	main.StopFire:Play()
+	self.effectsManager:RunAll("Idle")
+	local lightPart = self.model.Light
+	lightPart.BrickColor = BrickColor.new("Lime green")
+	lightPart.SpotLight.Color = Color3.new(0, 1, 0)
 end
 
 function Sentry:SetTeam(team: Team?)
@@ -257,7 +254,9 @@ end
 
 function Sentry:SetOwner(player: Player?)
 	self.ownerVal.Value = player
-	self.teamVal.Value = player.Team
+	if self.teamVal then
+		self.teamVal.Value = player and player.Team or nil
+	end
 	self:SetTarget(nil)
 end
 
@@ -265,7 +264,7 @@ end
 
 function Sentry:StartFire()
 	self.isFiring = true
-	self.main.InitiateFire:Play()
+	self.effectsManager:RunAll("StartFire")
 	task.wait(self.settings.Sentry.StartFireDelay)
 	local thisFireId = tick()
 	self.lastFireId = thisFireId
@@ -303,12 +302,12 @@ function Sentry:StartFire()
 				self.gatlingEvent:FireAllClients(currentRate)
 				task.wait(currentRate)
 			end
-			self.main.Spin:Stop()
+			self.effectsManager:RunAll("GatlingStop")
 			self.gatlingEvent:FireAllClients(nil)
 		end)
 		task.wait(1.3)
 		if self.target == currentRate then
-			self.main.Spin:Play()
+			self.effectsManager:RunAll("GatlingStart")
 		end
 	else
 		-- Basic sentry effects
@@ -349,13 +348,17 @@ function Sentry:Fire()
 	self:FireEffects()
 	if result then
 		local damageOptions = Table.DeepCopy(self.settings.Damage)
-		damageOptions.Dealer = self.ownerVal.Value or self.model
+		damageOptions.Dealer = self.model
 		damageOptions.Taker = result.Instance
 		damageOptions.Distance = { Distance = result.Distance }
 		damageOptions.Metadata = { IgnoreState = true } -- ! TODO: REDO
 		Damage.damage(damageOptions)
 		local takerConfig = damageOptions.TakerInfo.Config
-		if takerConfig and takerConfig.Health <= 0 then
+
+		local isDead = takerConfig and takerConfig.Health <= 0
+		local canDamage = not Table.Find(damageOptions.AppliedMultipliers, 0)
+
+		if isDead or not canDamage then
 			self:SetTarget(nil)
 		elseif not damageOptions.TakerInfo.IsDamageable then
 			-- Target is probably covered by an object
@@ -365,11 +368,12 @@ function Sentry:Fire()
 end
 
 function Sentry:Reload()
-	task.spawn(function()
-		self.main.Reload1:Play()
-		self.main.Reload1.Ended:Wait()
-		self.main.Reload2:Play()
-	end)
+	self.effectsManager:RunAll("Reload")
+	if self.effectsManager.Reload1 then
+		self.effectsManager.Reload1.Ended:Connect(function()
+			self.effectsManager:RunAll("ReloadEnd")
+		end)
+	end
 	task.wait(self.settings.Sentry.RelaodTime)
 	self.currentAmmo = self.settings.Sentry.Capacity
 end
@@ -377,39 +381,25 @@ end
 function Sentry:FireEffects()
 	local main = self.main
 
-	-- Bullet
-	local emitter = self.firePoint.Bullet
-	local speed = 3500 / 3
-	local lifetime = (self.firePoint.WorldCFrame.Position - self.target.Position).Magnitude
-		/ speed
-	emitter.Speed = NumberRange.new(speed, speed)
-	emitter.Lifetime = NumberRange.new(lifetime, lifetime)
-	emitter:Emit(1)
+	-- Effects
 
-	-- Sound
-	local sound = main.Fire:Clone()
-	sound.Parent = main
-	sound.PlayOnRemove = true
-	sound:Destroy()
-
-	-- Lighting and effects
-	local flash = self.firePoint.PointLight
-	spawn(function()
-		flash.Enabled = true
-		task.wait(0.05)
-		flash.Enabled = false
-	end)
-	main.Attachment.Flash:Emit(1)
-	main.Attachment.Muzzle:Emit(3)
-	main.Attachment.Spark:Emit(3)
-	if main:FindFirstChild("Shell") then
-		main.Shell.Shell:Emit(1)
+	local emitter = self.effectsManager.BulletEmitter
+	if emitter then
+		local speed = 3500
+		local lifetime = (self.firePoint.WorldCFrame.Position - self.target.Position).Magnitude
+			/ speed
+		emitter.Acceleration = Vector3.new()
+		emitter.Speed = NumberRange.new(speed, speed)
+		emitter.Lifetime = NumberRange.new(lifetime, lifetime)
+		emitter:Emit(1)
 	end
+
+	self.effectsManager:RunAll("Fire")
 
 	-- Barrel
 	local barrel = self.model:FindFirstChild("Barrel")
-	if self.settings.Sentry.OffsetBarrelStuds > 0 and barrel then
-		spawn(function()
+	if barrel and self.settings.Sentry.OffsetBarrelStuds > 0 then
+		task.spawn(function()
 			local tweenInfo =
 				TweenInfo.new(self.settings.Sentry.FireRate / 4, Enum.EasingStyle.Cubic)
 			local offset = Vector3.new(self.settings.Sentry.OffsetBarrelStuds, 0, 0)
@@ -458,27 +448,34 @@ function Sentry:GetNearbyEnemyRoots(range)
 	local team: Team = self.teamVal.Value
 	local owner = self.ownerVal.Value
 	local nearby = {}
-	local players =
+	local players = (
 		Table.Difference(Players:GetPlayers(), team and team:GetPlayers() or {})
+	)
 	for _, player: Player in players do
-		local distance = player:DistanceFromCharacter(self.main.Position)
-		if distance <= 0 or distance > range then
+		local humanoid: Humanoid = PlayerUtils.getObjects(player, "Humanoid")
+		if not humanoid or not humanoid.RootPart then
 			continue
 		end
-		if
-			owner
-			and not Damage.canDamage({
-				Dealer = owner,
-				Taker = player,
-				Metadata = { IgnoreState = true }, -- ! TODO: FIX
-			})
-		then
+		if not self:IsInRange(humanoid.RootPart.Position) then
+			continue
+		end
+
+		local takerObject = player
+		if humanoid.SeatPart then
+			takerObject =
+				InstSearch.findFirstAncestorTagged(humanoid.SeatPart, "Vehicle")
+		end
+
+		local damageOptions = Table.DeepCopy(self.settings.Damage)
+		damageOptions.Dealer = owner
+		damageOptions.Taker = takerObject
+		damageOptions.Metadata = { IgnoreState = true }
+		local canDamage = Damage.canDamage(damageOptions)
+		if not canDamage then
 			continue
 		end
 
 		-- Set as nearby
-		local character = player.Character
-		local humanoid = character.Humanoid
 		if humanoid.Health > 0 then
 			table.insert(nearby, player.Character:FindFirstChild("HumanoidRootPart"))
 		end
@@ -486,25 +483,32 @@ function Sentry:GetNearbyEnemyRoots(range)
 	return nearby
 end
 
-function Sentry:CanSee(hrp): boolean
+function Sentry:CanSee(targetPart: BasePart): boolean
 	local startPos = self.firePoint.WorldCFrame.Position
-	local result = SpaceUtils.castLineRay(startPos, hrp.Position, self.searchParams)
-		or {}
-	local instance = result.Instance
-	if not instance or not instance.CanCollide then
+	local result = (
+		SpaceUtils.castLineRay(startPos, targetPart.Position, self.searchParams)
+	)
+	local instance = result and result.Instance
+	if not instance then
 		return false
 	end
-	local distance = (hrp.Position - self.main.Position).Magnitude + 30
-	if distance > self.settings.Sentry.Range then
+	if not self:IsInRange(targetPart.Position) then
 		return false
 	end
 	local isDamageable = CollectionService:HasTag(
 		instance:FindFirstAncestorWhichIsA("Model"),
 		"Damageable"
 	)
-	if isDamageable or instance:IsDescendantOf(hrp.Parent) then
+	if isDamageable or instance:IsDescendantOf(targetPart.Parent) then
 		return true
 	end
+end
+
+function Sentry:IsInRange(position: Vector3)
+	local distance = (position - self.main.Position).Magnitude
+	local min, max =
+		(self.settings.Sentry.MinTargetDistance or 0), self.settings.Sentry.Range
+	return distance >= min and distance <= max
 end
 
 function Sentry:SetTarget(hrp)
@@ -515,7 +519,7 @@ function Sentry:SetTarget(hrp)
 		local light = self.model.Light
 		light.BrickColor = BrickColor.new("Really red")
 		light.SpotLight.Color = Color3.new(1, 0, 0)
-		main.Enemy:Play()
+		self.effectsManager:Run("LockOn")
 		if self.target and not self.isFiring then
 			self:StartFire()
 		end
@@ -531,13 +535,10 @@ end
 
 --[[
 	
-	Persistent streaming only
+	Persistent streaming only (???)
 
 	Sentry movement will involved fast and repreated 
-	event firing to clients. To reduce receiving packets,
-	this is done with the creation of new remote events
-	to avoid having to send instances as a paremeter when
-	using a Kernel force client wrapper.
+	event firing to clients.
 	
 ]]
 
@@ -547,21 +548,54 @@ function Sentry.clientSetup(model: Model)
 	local main = model:WaitForChild("Main")
 	local config = LiveConfig:new(model)
 	local targetVal = InstSearch.quietWaitForChild(model, "Target")
+	local teamVal = InstSearch.quietWaitForChild(model, "Team")
 	local sentrySettings = require(model:WaitForChild("Settings")).Sentry
 	local sentryScript = main.Parent:FindFirstChildWhichIsA("Script")
+	local LocalPlayer = game.Players.LocalPlayer
 
-	local function orient(cframe: CFrame, speed: number)
+	local effectsManager = EffectsManager:new(model:GetDescendants())
+
+	local function evaluateIcon()
+		local enemyIcon = model:FindFirstChild("EnemyIcon")
+		if not enemyIcon then
+			return
+		end
+
+		enemyIcon.Enabled = teamVal.Value ~= LocalPlayer.Team and config.Enabled
+	end
+
+	local activeTween
+	local function orient(cframe, speed, force: boolean)
+		if not force then
+			local distance = LocalPlayer:DistanceFromCharacter(main.Position)
+			if distance > (SETTINGS.MaxClientWanderDistance or 2100) then
+				return
+			end
+		end
+
+		if activeTween then
+			activeTween:Cancel()
+		end
 		local tweenInfo = TweenInfo.new(speed, Enum.EasingStyle.Back)
-		local tween = TweenService:Create(main, tweenInfo, { CFrame = cframe })
-		tween:Play()
+		activeTween = TweenService:Create(main, tweenInfo, { CFrame = cframe })
+		activeTween:Play()
 	end
 
 	local function target(currentTarget)
+		local isLocalPlayerTarget = false
+
+		if currentTarget then
+			local character = LocalPlayer.Character
+			if character then
+				isLocalPlayerTarget = currentTarget:IsDescendantOf(character)
+			end
+		end
+
 		task.spawn(function()
 			while targetVal.Value == currentTarget and config.Enabled do
 				local cframe = CFrame.new(main.CFrame.Position, currentTarget.Position)
-				orient(cframe, sentrySettings.LockOnSpeed)
-				task.wait(0.1)
+				orient(cframe, sentrySettings.LockOnSpeed, isLocalPlayerTarget)
+				task.wait(0.25)
 			end
 		end)
 	end
@@ -569,8 +603,7 @@ function Sentry.clientSetup(model: Model)
 	local function wander()
 		task.delay(3, function()
 			while not targetVal.Value and config.Enabled do
-				main.Servo.PlaybackSpeed = math.random(90, 110) / 100
-				main.Servo:Play()
+				effectsManager:RunAll("Wander")
 				local randPos = Vector3.new(
 					math.random(-1000, 1000),
 					math.random(sentrySettings.WanderYMin, sentrySettings.WanderYMax),
@@ -578,29 +611,30 @@ function Sentry.clientSetup(model: Model)
 				)
 				local cframe = CFrame.new(main.CFrame.Position, randPos)
 				orient(cframe, sentrySettings.WanderSpeed)
-				task.wait(math.random(2, sentrySettings.WanderFrequency))
+
+				task.wait(math.random( -- TODO: WANDER FREQUENCY SHOULD BE REDUCED
+					sentrySettings.WanderFrequency * 3,
+					sentrySettings.WanderFrequency * 4
+				))
 			end
 		end)
 	end
 
 	local function enable()
-		main.Smoke.Enabled = false
-		main.Down:Stop()
+		effectsManager:RunAll("Enable")
 		wander()
 	end
 
 	local function disable()
-		main.Explode:Emit(15)
-		main.Smoke.Enabled = true
-		main.Disable:Play()
-		main.Shutdown:Play()
-		main.Down:Play()
-		local pos = Vector3.new(
-			math.random(-1000, 1000),
-			main.Parent:GetPivot().Y - 1000,
-			math.random(-1000, 1000)
-		)
-		orient(CFrame.new(main.CFrame.Position, pos), sentrySettings.WanderSpeed)
+		if config.Health <= 0 then
+			effectsManager:RunAll("Disable")
+			local pos = Vector3.new(
+				math.random(-100, 100),
+				main.Parent:GetPivot().Y - 3000,
+				math.random(-100, 100)
+			)
+			orient(CFrame.new(main.CFrame.Position, pos), 2)
+		end
 	end
 
 	local function onTargetChange()
@@ -620,18 +654,18 @@ function Sentry.clientSetup(model: Model)
 		else
 			disable()
 		end
+		evaluateIcon()
 	end)
 
 	config:Watch("Health", function(new, prev)
 		local change = new - (prev or 0)
 		if change > 0 then
-			local gearSound = main.Gears
-			local repairSounds = { main.Drill, main.Hammer, main.Pump }
-			local randSound = Table.RandomChoice(repairSounds)
-			gearSound:Play()
-			randSound:Play()
-			main.HealthSmoke:Emit(4)
-			main.Parts:Emit(4)
+			local gearSound = effectsManager.Gears
+			local repairSounds = effectsManager.groups["RepairChoices"]
+			if repairSounds then
+				effectsManager:Run(repairSounds:RandomChoice())
+			end
+			effectsManager:RunAll("Repair")
 		end
 	end)
 
@@ -664,7 +698,10 @@ function Sentry.clientSetup(model: Model)
 		end)
 	end
 
+	evaluateIcon()
 	onTargetChange()
+
+	teamVal:GetPropertyChangedSignal("Value"):Connect(evaluateIcon)
 end
 
 return Sentry
