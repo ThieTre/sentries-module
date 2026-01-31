@@ -8,9 +8,12 @@ local Utils = {}
 
 function Utils.buildFromModel(model: Model, owner: Player?)
 	local sentryScript = cloned.ServerSentry:Clone()
-	model:SetAttribute("Owner", owner.UserId)
 	sentryScript.Parent = model
 	sentryScript.Enabled = true
+	if owner then
+		local ownerVal = model:WaitForChild("Owner")
+		ownerVal.Value = owner
+	end
 end
 
 return Utils

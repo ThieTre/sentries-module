@@ -2,6 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerStorage = game:GetService("ServerStorage")
 local CollectionService = game:GetService("CollectionService")
+local TextService = game:GetService("TextService")
 local TweenService = game:GetService("TweenService")
 local Players = game:GetService("Players")
 local Modules = ReplicatedStorage.Modules
@@ -15,6 +16,7 @@ local EffectsManager = require(Modules.Mega.Utils.EffectsManager)
 local SpaceUtils = require(Modules.Mega.Utils.Space)
 local PlayerUtils = require(Modules.Mega.Utils.Player)
 local Damage = require(Modules.Damage.Damage)
+local VehicleUtils = require(Modules.Vehicles.Utils)
 
 local assets = RunService:IsServer() and ServerStorage.Assets.Sentries
 
@@ -103,15 +105,6 @@ function Sentry:_SetupModel()
 	self.targetVal = InstModify.create("ObjectValue", self.model, { Name = "Target" })
 	self.teamVal = InstModify.create("ObjectValue", self.model, { Name = "Team" })
 
-	-- Get owner value object, may already have been created
-	-- by a utility function
-	self.ownerVal = InstModify.findOrCreateChild(
-		self.model,
-		"Owner",
-		"ObjectValue",
-		{ Name = "Owner" }
-	)
-
 	-- Ui
 	local uiAssets = assets:FindFirstChild("Ui") or assets
 	self.healthUi = uiAssets.HealthBar:Clone()
@@ -119,7 +112,7 @@ function Sentry:_SetupModel()
 	self.repairUi.Parent = self.main
 	self.healthUi.Parent = self.model
 
-	if SETTINGS.EnemyIcon then
+	if self.settings.Sentry.UseEnemyIcon and SETTINGS.EnemyIcon then
 		InstModify.clone(SETTINGS.EnemyIcon, self.model, {
 			MaxDistance = self.settings.Sentry.Range * 1.5,
 		})
@@ -138,6 +131,21 @@ function Sentry:_SetupModel()
 			self.model.Barrel.Weld.C0.Position
 		)
 	end
+
+	-- Owner and enabling
+	self.ownerVal = InstModify.findOrCreateChild(
+		self.model,
+		"Owner",
+		"ObjectValue",
+		{ Name = "Owner" }
+	)
+	self.ownerVal:GetPropertyChangedSignal("Value"):Connect(function()
+		self:SetTarget(nil)
+	end)
+
+	self.config:Watch("Enabled", function()
+		self:SetTarget(nil)
+	end)
 
 	-- Client script
 	local clientScript = script.Parent.Cloned.ClientSentry:Clone()
@@ -159,6 +167,38 @@ function Sentry:_SetupHealth()
 		end
 		if new <= 0 then
 			self:Disable()
+			local light = self.model:FindFirstChild("Light")
+			if self.config.Health <= 0 and self.settings.Sentry.ReviveTime then
+				if self.settings.Sentry.ReviveTime then
+					task.spawn(function()
+						local downCount = 0
+						while not self.config.Enabled do
+							self.repairUi.Enabled = true
+							if light then
+								light.SpotLight.Enabled = true
+							end
+							task.wait(0.5)
+							self.repairUi.Enabled = false
+							if light then
+								light.SpotLight.Enabled = false
+							end
+							task.wait(0.5)
+							downCount += 1
+							if
+								downCount >= self.settings.Sentry.ReviveTime
+								and not self.config.Enabled
+							then
+								self:Enable()
+								self.config.Health = self.settings.Sentry.Health / 2
+							end
+						end
+						if light then
+							light.SpotLight.Enabled = true
+						end
+						self.repairUi.Enabled = false
+					end)
+				end
+			end
 		end
 	end
 
@@ -171,7 +211,7 @@ function Sentry:_SetupHealth()
 	-- Auto repair
 	if self.settings.Sentry.RepairFrequency then
 		task.spawn(function()
-			while true do
+			while self.model.Parent do
 				if
 					self.config.Enabled
 					and config.Health < self.settings.Sentry.Health
@@ -197,9 +237,7 @@ function Sentry:Enable()
 
 	task.spawn(function()
 		while self.config.Enabled do
-			task.spawn(function()
-				self:Search()
-			end)
+			self:Search()
 			task.wait(math.clamp(self.settings.Sentry.SearchSpeed, 1, 100))
 		end
 	end)
@@ -207,45 +245,21 @@ function Sentry:Enable()
 end
 
 function Sentry:Disable()
+	self.config.Enabled = false
 	if self.settings.Sentry.PromptRevive then
 		self.prompt.Enabled = true
 	end
 	self.model:RemoveTag("Damageable")
-	self.config.Enabled = false
 	self:SetTarget(nil)
-	local light = self.model.Light
-	if self.config.Health <= 0 and self.settings.Sentry.ReviveTime then
-		if self.settings.Sentry.ReviveTime then
-			task.spawn(function()
-				local downCount = 0
-				while not self.config.Enabled do
-					self.repairUi.Enabled = true
-					light.SpotLight.Enabled = true
-					task.wait(0.5)
-					self.repairUi.Enabled = false
-					light.SpotLight.Enabled = false
-					task.wait(0.5)
-					downCount += 1
-					if
-						downCount >= self.settings.Sentry.ReviveTime
-						and not self.config.Enabled
-					then
-						self:Enable()
-						self.config.Health = self.settings.Sentry.Health / 2
-					end
-				end
-				light.SpotLight.Enabled = true
-				self.repairUi.Enabled = false
-			end)
-		end
-	end
 end
 
 function Sentry:Idle()
 	self.effectsManager:RunAll("Idle")
-	local lightPart = self.model.Light
-	lightPart.BrickColor = BrickColor.new("Lime green")
-	lightPart.SpotLight.Color = Color3.new(0, 1, 0)
+	local lightPart = self.model:FindFirstChild("Light")
+	if lightPart then
+		lightPart.BrickColor = BrickColor.new("Lime green")
+		lightPart.SpotLight.Color = Color3.new(0, 1, 0)
+	end
 end
 
 function Sentry:SetTeam(team: Team?)
@@ -348,10 +362,11 @@ function Sentry:Fire()
 	self:FireEffects()
 	if result then
 		local damageOptions = Table.DeepCopy(self.settings.Damage)
-		damageOptions.Dealer = self.model
+		damageOptions.Dealer = self.ownerVal.Value or self.model
 		damageOptions.Taker = result.Instance
 		damageOptions.Distance = { Distance = result.Distance }
 		damageOptions.Metadata = { IgnoreState = true } -- ! TODO: REDO
+
 		Damage.damage(damageOptions)
 		local takerConfig = damageOptions.TakerInfo.Config
 
@@ -370,7 +385,7 @@ end
 function Sentry:Reload()
 	self.effectsManager:RunAll("Reload")
 	if self.effectsManager.Reload1 then
-		self.effectsManager.Reload1.Ended:Connect(function()
+		self.effectsManager.Reload1.Ended:Once(function()
 			self.effectsManager:RunAll("ReloadEnd")
 		end)
 	end
@@ -426,45 +441,46 @@ function Sentry:Search()
 	-- Look for a target
 	if self.target then
 		-- Keep tracking current target
-		if self:CanSee(self.target) then
+		if self:CanSee(self.target) and self:IsInAimArc(self.target.Position) then
 			return
 		else
 			self:SetTarget(nil)
 		end
 	end
 	-- Look for new target
-	local hrps = self:GetNearbyEnemyRoots(self.settings.Sentry.Range)
-	for _, hrp in pairs(hrps) do
-		if self:CanSee(hrp) then
-			self:SetTarget(hrp)
+	local targetParts = self:GetNearbyTargets(self.settings.Sentry.Range)
+	for _, p in targetParts do
+		if self:CanSee(p) then
+			self:SetTarget(p)
 			break
 		end
 	end
 end
 
-function Sentry:GetNearbyEnemyRoots(range)
-	-- Function to efficiently find the number
-	-- of nearby enemy root parts
+--[[
+	Function to efficiently find the number
+	of nearby enemy root parts
+]]
+function Sentry:GetNearbyTargets(range): { BasePart }
 	local team: Team = self.teamVal.Value
+	local teamPlayers = team and team:GetPlayers() or nil
 	local owner = self.ownerVal.Value
 	local nearby = {}
-	local players = (
-		Table.Difference(Players:GetPlayers(), team and team:GetPlayers() or {})
+
+	local function evaluateTarget(
+		targetPart: BasePart,
+		vehicle: Model?,
+		player: Player?
 	)
-	for _, player: Player in players do
-		local humanoid: Humanoid = PlayerUtils.getObjects(player, "Humanoid")
-		if not humanoid or not humanoid.RootPart then
-			continue
-		end
-		if not self:IsInRange(humanoid.RootPart.Position) then
-			continue
+		if not self:IsInRange(targetPart.Position) then
+			return
 		end
 
-		local takerObject = player
-		if humanoid.SeatPart then
-			takerObject =
-				InstSearch.findFirstAncestorTagged(humanoid.SeatPart, "Vehicle")
+		if not self:IsInAimArc(targetPart.Position) then
+			return
 		end
+
+		local takerObject = vehicle or player or targetPart
 
 		local damageOptions = Table.DeepCopy(self.settings.Damage)
 		damageOptions.Dealer = owner
@@ -472,14 +488,51 @@ function Sentry:GetNearbyEnemyRoots(range)
 		damageOptions.Metadata = { IgnoreState = true }
 		local canDamage = Damage.canDamage(damageOptions)
 		if not canDamage then
-			continue
+			return
+		end
+
+		local takerConfig = damageOptions.TakerInfo.Config
+		local currentHealth
+		if damageOptions.TakerInfo.Type == "Player" then
+			currentHealth = takerConfig.Health
+		else
+			currentHealth = takerObject:GetAttribute("Health")
 		end
 
 		-- Set as nearby
-		if humanoid.Health > 0 then
-			table.insert(nearby, player.Character:FindFirstChild("HumanoidRootPart"))
+		if currentHealth > 0 then
+			table.insert(nearby, targetPart)
 		end
 	end
+
+	for _, player: Player in Players:GetPlayers() do
+		if teamPlayers and table.find(teamPlayers, player) then
+			continue
+		end
+
+		local humanoid: Humanoid = PlayerUtils.getObjects(player, "Humanoid")
+		local rootPart = humanoid and humanoid.RootPart
+		if rootPart then
+			local seatPart = humanoid.SeatPart
+			local vehicle = (
+				seatPart and InstSearch.findFirstAncestorTagged(seatPart, "Vehicle")
+			)
+			evaluateTarget(rootPart, vehicle, player)
+		end
+	end
+
+	-- Empty vehicles... not needed yet
+	-- if RunService:IsStudio() then
+	-- 	for _, vehicle in CollectionService:GetTagged("Vehicle") do
+	-- 		local main = (
+	-- 			vehicle:FindFirstChild("Body") and vehicle.Body:FindFirstChild("Main")
+	-- 		)
+	-- 		if main then
+	-- 			evaluateTarget(main, vehicle)
+	-- 		end
+	-- 	end
+	-- end
+
 	return nearby
 end
 
@@ -495,6 +548,11 @@ function Sentry:CanSee(targetPart: BasePart): boolean
 	if not self:IsInRange(targetPart.Position) then
 		return false
 	end
+
+	if not self:IsInAimArc(targetPart.Position) then
+		return false
+	end
+
 	local isDamageable = CollectionService:HasTag(
 		instance:FindFirstAncestorWhichIsA("Model"),
 		"Damageable"
@@ -508,17 +566,54 @@ function Sentry:IsInRange(position: Vector3)
 	local distance = (position - self.main.Position).Magnitude
 	local min, max =
 		(self.settings.Sentry.MinTargetDistance or 0), self.settings.Sentry.Range
+
 	return distance >= min and distance <= max
 end
 
-function Sentry:SetTarget(hrp)
-	self.target = hrp
-	self.targetVal.Value = hrp
-	if hrp and self.config.Enabled then
+function Sentry:IsInAimArc(worldPosition: Vector3): boolean
+	local maxYaw = self.settings.Sentry.MaxYaw
+	local maxPitch = self.settings.Sentry.MaxPitch
+
+	-- No limits configured
+	if (not maxYaw or maxYaw >= 180) and (not maxPitch or maxPitch >= 90) then
+		return true
+	end
+
+	local origin = self.main.Position
+	local delta = worldPosition - origin
+	local mag = delta.Magnitude
+	if mag < 1e-6 then
+		return true
+	end
+
+	-- Convert direction into main's object space
+	local basis = self.main.CFrame
+	local v = basis:VectorToObjectSpace(delta / mag)
+
+	-- Roblox "forward" is -Z in object space
+	local yawDeg = math.deg(math.atan2(v.X, -v.Z)) -- left/right
+	local pitchDeg = math.deg(math.atan2(v.Y, math.sqrt(v.X * v.X + v.Z * v.Z))) -- up/down
+
+	if maxYaw and math.abs(yawDeg) > maxYaw then
+		return false
+	end
+	if maxPitch and math.abs(pitchDeg) > maxPitch then
+		return false
+	end
+	return true
+end
+
+function Sentry:SetTarget(part: BasePart)
+	self.target = part
+	self.targetVal.Value = part
+	if part and self.config.Enabled then
 		local main = self.main
-		local light = self.model.Light
-		light.BrickColor = BrickColor.new("Really red")
-		light.SpotLight.Color = Color3.new(1, 0, 0)
+		local light = self.model:FindFirstChild("Light")
+		if light then
+			light.BrickColor = BrickColor.new("Really red")
+			light.SpotLight.Color = Color3.new(1, 0, 0)
+		end
+
 		self.effectsManager:Run("LockOn")
 		if self.target and not self.isFiring then
 			self:StartFire()
@@ -552,6 +647,24 @@ function Sentry.clientSetup(model: Model)
 	local sentrySettings = require(model:WaitForChild("Settings")).Sentry
 	local sentryScript = main.Parent:FindFirstChildWhichIsA("Script")
 	local LocalPlayer = game.Players.LocalPlayer
+	local ownerVal = model:WaitForChild("Owner")
+
+	local align, rigid
+	local contraints = model:FindFirstChild("Constraints")
+	if contraints then
+		local ballConstraint = contraints.BallSocketConstraint
+		rigid = contraints.RigidConstraint
+		ballConstraint.Enabled = true
+		-- local rigidConstraint = contraints.RigidConstraint
+		-- rigidConstraint.Enabled = false
+		align = contraints:FindFirstChild("AlignOrientation")
+		if not align then
+			align = Instance.new("AlignOrientation")
+			align.Mode = Enum.OrientationAlignmentMode.OneAttachment
+			align.Attachment0 = ballConstraint.Attachment1
+			align.Parent = contraints
+		end
+	end
 
 	local effectsManager = EffectsManager:new(model:GetDescendants())
 
@@ -573,36 +686,55 @@ function Sentry.clientSetup(model: Model)
 			end
 		end
 
-		if activeTween then
-			activeTween:Cancel()
+		if align then
+			if LocalPlayer ~= ownerVal.Value then
+				-- Does not work with not netwrok owner right now
+				return
+			end
+
+			local rotation = cframe - cframe.Position
+			align.CFrame = cframe
+		else
+			if activeTween then
+				activeTween:Cancel()
+			end
+			local tweenInfo = TweenInfo.new(speed, Enum.EasingStyle.Back)
+			activeTween = TweenService:Create(main, tweenInfo, { CFrame = cframe })
+			activeTween:Play()
 		end
-		local tweenInfo = TweenInfo.new(speed, Enum.EasingStyle.Back)
-		activeTween = TweenService:Create(main, tweenInfo, { CFrame = cframe })
-		activeTween:Play()
+	end
+
+	local gen = 0
+	local function bumpGen()
+		gen += 1
+		return gen
 	end
 
 	local function target(currentTarget)
-		local isLocalPlayerTarget = false
-
-		if currentTarget then
-			local character = LocalPlayer.Character
-			if character then
-				isLocalPlayerTarget = currentTarget:IsDescendantOf(character)
-			end
-		end
-
+		local myGen = bumpGen()
 		task.spawn(function()
-			while targetVal.Value == currentTarget and config.Enabled do
-				local cframe = CFrame.new(main.CFrame.Position, currentTarget.Position)
-				orient(cframe, sentrySettings.LockOnSpeed, isLocalPlayerTarget)
+			while
+				gen == myGen
+				and targetVal.Value == currentTarget
+				and config.Enabled
+			do
+				orient(
+					CFrame.new(main.Position, currentTarget.Position),
+					sentrySettings.LockOnSpeed,
+					false
+				)
 				task.wait(0.25)
 			end
 		end)
 	end
 
 	local function wander()
+		if sentrySettings.WanderDisabled then
+			return
+		end
+		local myGen = bumpGen()
 		task.delay(3, function()
-			while not targetVal.Value and config.Enabled do
+			while gen == myGen and not targetVal.Value and config.Enabled do
 				effectsManager:RunAll("Wander")
 				local randPos = Vector3.new(
 					math.random(-1000, 1000),
@@ -639,6 +771,10 @@ function Sentry.clientSetup(model: Model)
 
 	local function onTargetChange()
 		local currentTarget: BasePart = targetVal.Value
+
+		if rigid and ownerVal.Value == LocalPlayer then
+			rigid.Enabled = currentTarget == nil
+		end
 		if currentTarget then
 			target(currentTarget)
 		else
