@@ -167,20 +167,21 @@ function Sentry:_SetupHealth()
 		end
 		if new <= 0 then
 			self:Disable()
-			local light = self.model:FindFirstChild("Light")
+			local light = self.main:FindFirstChild("Light")
+			local spotLight = light and light:FindFirstChild("SpotLight")
 			if self.config.Health <= 0 and self.settings.Sentry.ReviveTime then
 				if self.settings.Sentry.ReviveTime then
 					task.spawn(function()
 						local downCount = 0
 						while not self.config.Enabled do
 							self.repairUi.Enabled = true
-							if light then
-								light.SpotLight.Enabled = true
+							if spotLight then
+								spotLight.Enabled = true
 							end
 							task.wait(0.5)
 							self.repairUi.Enabled = false
-							if light then
-								light.SpotLight.Enabled = false
+							if spotLight then
+								spotLight.Enabled = false
 							end
 							task.wait(0.5)
 							downCount += 1
@@ -192,8 +193,8 @@ function Sentry:_SetupHealth()
 								self.config.Health = self.settings.Sentry.Health / 2
 							end
 						end
-						if light then
-							light.SpotLight.Enabled = true
+						if spotLight then
+							spotLight.Enabled = true
 						end
 						self.repairUi.Enabled = false
 					end)
@@ -258,7 +259,10 @@ function Sentry:Idle()
 	local lightPart = self.model:FindFirstChild("Light")
 	if lightPart then
 		lightPart.BrickColor = BrickColor.new("Lime green")
-		lightPart.SpotLight.Color = Color3.new(0, 1, 0)
+		local spotLight = lightPart:FindFirstChild("SpotLight")
+		if spotLight then
+			spotLight.Color = Color3.new(0, 1, 0)
+		end
 	end
 end
 
@@ -611,7 +615,10 @@ function Sentry:SetTarget(part: BasePart)
 		local light = self.model:FindFirstChild("Light")
 		if light then
 			light.BrickColor = BrickColor.new("Really red")
-			light.SpotLight.Color = Color3.new(1, 0, 0)
+			local spotLight = light:FindFirstChild("SpotLight")
+			if spotLight then
+				light.SpotLight.Color = Color3.new(1, 0, 0)
+			end
 		end
 
 		self.effectsManager:Run("LockOn")
