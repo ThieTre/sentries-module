@@ -557,10 +557,13 @@ function Sentry:CanSee(targetPart: BasePart): boolean
 		return false
 	end
 
-	local isDamageable = CollectionService:HasTag(
-		instance:FindFirstAncestorWhichIsA("Model"),
-		"Damageable"
-	)
+	local ancestorModel = instance:FindFirstAncestorWhichIsA("Model")
+	local isDamageable = CollectionService:HasTag(ancestorModel, "Damageable")
+
+	if ancestorModel:GetAttribute("EnemyTransparency") == 1 then
+		return false
+	end
+
 	if isDamageable or instance:IsDescendantOf(targetPart.Parent) then
 		return true
 	end
