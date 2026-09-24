@@ -525,6 +525,15 @@ function Sentry:GetNearbyTargets(range): { BasePart }
 		end
 	end
 
+	for _, vehicle in CollectionService:GetTagged("vehicle-npc") do
+		local main = (
+			vehicle:FindFirstChild("Body") and vehicle.Body:FindFirstChild("Main")
+		)
+		if main then
+			evaluateTarget(main, vehicle)
+		end
+	end
+
 	-- Empty vehicles... not needed yet
 	-- if RunService:IsStudio() then
 	-- 	for _, vehicle in CollectionService:GetTagged("Vehicle") do
