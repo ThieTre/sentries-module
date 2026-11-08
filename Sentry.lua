@@ -17,6 +17,7 @@ local SpaceUtils = require(Modules.Mega.Utils.Space)
 local PlayerUtils = require(Modules.Mega.Utils.Player)
 local Damage = require(Modules.Damage.Damage)
 local VehicleUtils = require(Modules.Vehicles.Utils)
+local CombatMarkersServer = RunService:IsServer() and require(Modules.CombatMarkers.Server)
 
 local assets = RunService:IsServer() and ServerStorage.Assets.Sentries
 
@@ -372,6 +373,21 @@ function Sentry:Fire()
 		damageOptions.Metadata = { IgnoreState = true } -- ! TODO: REDO
 
 		Damage.damage(damageOptions)
+		if ((damageOptions.AppliedHealthDamage or 0) > 0 or (damageOptions.AppliedBufferDamage or 0) > 0)
+			and CombatMarkersServer.spotSentry then
+			local takerInfo = damageOptions.TakerInfo
+			local player
+			if takerInfo.Type == "Player" then
+				player = takerInfo.Owner
+			elseif takerInfo.Type == "Vehicle" or takerInfo.OriginalType == "Vehicle" then
+				local driverId = damageOptions.Taker:GetAttribute("DriverUserId")
+				player = driverId and Players:GetPlayerByUserId(driverId)
+				if player and VehicleUtils.getPlayerDrivingVehicle(player) ~= damageOptions.Taker then
+					player = nil
+				end
+			end
+			if player then CombatMarkersServer.spotSentry(player, self.model) end
+		end
 		local takerConfig = damageOptions.TakerInfo.Config
 
 		local isDead = takerConfig and takerConfig.Health <= 0
