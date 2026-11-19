@@ -17,6 +17,8 @@ local SpaceUtils = require(Modules.Mega.Utils.Space)
 local PlayerUtils = require(Modules.Mega.Utils.Player)
 local Damage = require(Modules.Damage.Damage)
 local VehicleUtils = require(Modules.Vehicles.Utils)
+local CombatEligibility = require(Modules.Vehicles.NPC.CombatEligibility)
+local SentryUtils = require(script.Parent.Utils)
 local CombatMarkersServer = RunService:IsServer() and require(Modules.CombatMarkers.Server)
 
 local assets = RunService:IsServer() and ServerStorage.Assets.Sentries
@@ -42,6 +44,14 @@ function Sentry:new(model: Model, owner: Player?)
 	self = setmetatable({}, { __index = Sentry })
 	self.settings = require(model.Settings)
 	self.model = model
+	self.sourceContext = SentryUtils.getSourceContext(model)
+	model.Destroying:Once(function()
+		self.destroyed = true
+		self.config.Enabled = false
+		self.target = nil
+		self.lastFireId = nil
+		CombatEligibility.Remove(model)
+	end)
 	self.main = model.Main
 	self.firePoint = self.main.Attachment
 	self.config = LiveConfig:new(self.model)
@@ -76,12 +86,25 @@ function Sentry:new(model: Model, owner: Player?)
 	end
 
 	self:_SetupHealth()
+	self:_SetupTeamColors()
 
 	-- Ownership
-	if not self.ownerVal.Value and owner then
+	if self.sourceContext and self.sourceContext.BotId then
+		self.ownerVal.Value = nil
+		self:SetTeam(self.sourceContext.Team)
+		local options = self.sourceContext.CombatOptions
+		CombatEligibility.Register(model, {
+			AllowNPCCombat = options and options.AllowNPCCombat or false,
+			TargetTeams = options and options.TargetTeams,
+			Active = true,
+		})
+	elseif owner then
 		self:SetOwner(owner)
+	elseif self.ownerVal.Value then
+		self:SetTeam(self.ownerVal.Value.Team)
+	else
+		self:SetTeam(self.settings.Sentry.Team)
 	end
-	self:SetTeam(self.settings.Sentry.Team)
 
 	-- Firing
 	self.currentAmmo = self.settings.Sentry.Capacity
@@ -104,7 +127,7 @@ function Sentry:_SetupModel()
 	self.scriptFolder = InstModify.create("Folder", self.model, { Name = "Scripting" })
 	self.prompt = InstModify.create("ProximityPrompt", self.main)
 	self.targetVal = InstModify.create("ObjectValue", self.model, { Name = "Target" })
-	self.teamVal = InstModify.create("ObjectValue", self.model, { Name = "Team" })
+	self.teamVal = InstModify.findOrCreateChild(self.model, "Team", "ObjectValue", { Name = "Team" })
 
 	-- Ui
 	local uiAssets = assets:FindFirstChild("Ui") or assets
@@ -174,7 +197,7 @@ function Sentry:_SetupHealth()
 				if self.settings.Sentry.ReviveTime then
 					task.spawn(function()
 						local downCount = 0
-						while not self.config.Enabled do
+						while not self.destroyed and not self.config.Enabled do
 							self.repairUi.Enabled = true
 							if spotLight then
 								spotLight.Enabled = true
@@ -194,6 +217,7 @@ function Sentry:_SetupHealth()
 								self.config.Health = self.settings.Sentry.Health / 2
 							end
 						end
+						if self.destroyed then return end
 						if spotLight then
 							spotLight.Enabled = true
 						end
@@ -213,7 +237,7 @@ function Sentry:_SetupHealth()
 	-- Auto repair
 	if self.settings.Sentry.RepairFrequency then
 		task.spawn(function()
-			while self.model.Parent do
+			while not self.destroyed and self.model.Parent do
 				if
 					self.config.Enabled
 					and config.Health < self.settings.Sentry.Health
@@ -228,17 +252,44 @@ end
 
 -- =============== State ==============
 
+function Sentry:_SetupTeamColors()
+	local replaceColors = self.settings.Sentry.ReplaceTeamColor
+	if not replaceColors then return end
+
+	-- Keep the original matches so changing teams also recolors previously replaced parts.
+	local originalColors = {}
+	for _, descendant in self.model:GetDescendants() do
+		if descendant:IsA("BasePart") and table.find(replaceColors, descendant.Color) then
+			originalColors[descendant] = descendant.Color
+		end
+	end
+
+	local function updateColors()
+		local team = self.teamVal.Value
+		for part, originalColor in originalColors do
+			if part:IsDescendantOf(self.model) then
+				part.Color = team and team.TeamColor.Color or originalColor
+			end
+		end
+	end
+
+	self.teamVal:GetPropertyChangedSignal("Value"):Connect(updateColors)
+	updateColors()
+end
+
 function Sentry:Enable()
+	if self.destroyed then return end
 	if self.config.Enabled then
 		LOG:Debug("Sentry is already enabled!")
 		return
 	end
 	self.config.Enabled = true
+	CombatEligibility.SetActive(self.model, true)
 
 	self.model:AddTag("Damageable")
 
 	task.spawn(function()
-		while self.config.Enabled do
+		while not self.destroyed and self.config.Enabled do
 			self:Search()
 			task.wait(math.clamp(self.settings.Sentry.SearchSpeed, 1, 100))
 		end
@@ -248,6 +299,7 @@ end
 
 function Sentry:Disable()
 	self.config.Enabled = false
+	CombatEligibility.SetActive(self.model, false)
 	if self.settings.Sentry.PromptRevive then
 		self.prompt.Enabled = true
 	end
@@ -256,6 +308,7 @@ function Sentry:Disable()
 end
 
 function Sentry:Idle()
+	if self.destroyed then return end
 	self.effectsManager:RunAll("Idle")
 	local lightPart = self.model:FindFirstChild("Light")
 	if lightPart then
@@ -285,6 +338,7 @@ function Sentry:StartFire()
 	self.isFiring = true
 	self.effectsManager:RunAll("StartFire")
 	task.wait(self.settings.Sentry.StartFireDelay)
+	if self.destroyed or not self.config.Enabled or not self.target then return end
 	local thisFireId = tick()
 	self.lastFireId = thisFireId
 	local currentTarget = self.target
@@ -353,11 +407,15 @@ end
 function Sentry:Fire()
 	-- Conditions
 	local target: BasePart = self.target
-	if not target then
+	if self.destroyed or not self.config.Enabled or not target or not target.Parent then
 		return
 	end
 	if self.currentAmmo < 1 then
 		self:Reload()
+		return
+	end
+	if not self:CanAttack(target) then
+		self:SetTarget(nil)
 		return
 	end
 	local startPos = self.firePoint.WorldCFrame.Position
@@ -458,10 +516,11 @@ end
 -- =============== Target Finding ==============
 
 function Sentry:Search()
+	if self.destroyed then return end
 	-- Look for a target
 	if self.target then
 		-- Keep tracking current target
-		if self:CanSee(self.target) and self:IsInAimArc(self.target.Position) then
+		if self:CanAttack(self.target) and self:CanSee(self.target) and self:IsInAimArc(self.target.Position) then
 			return
 		else
 			self:SetTarget(nil)
@@ -503,7 +562,7 @@ function Sentry:GetNearbyTargets(range): { BasePart }
 		local takerObject = vehicle or player or targetPart
 
 		local damageOptions = Table.DeepCopy(self.settings.Damage)
-		damageOptions.Dealer = owner
+		damageOptions.Dealer = owner or self.model
 		damageOptions.Taker = takerObject
 		damageOptions.Metadata = { IgnoreState = true }
 		local canDamage = Damage.canDamage(damageOptions)
@@ -520,7 +579,7 @@ function Sentry:GetNearbyTargets(range): { BasePart }
 		end
 
 		-- Set as nearby
-		if currentHealth > 0 then
+		if currentHealth and currentHealth > 0 then
 			table.insert(nearby, targetPart)
 		end
 	end
@@ -541,14 +600,15 @@ function Sentry:GetNearbyTargets(range): { BasePart }
 		end
 	end
 
-	-- for _, vehicle in CollectionService:GetTagged("vehicle-npc") do
-	-- 	local main = (
-	-- 		vehicle:FindFirstChild("Body") and vehicle.Body:FindFirstChild("Main")
-	-- 	)
-	-- 	if main then
-	-- 		evaluateTarget(main, vehicle)
-	-- 	end
-	-- end
+	for vehicle in CombatEligibility.GetCandidates() do
+		if vehicle:IsDescendantOf(workspace) then
+			local main = vehicle.PrimaryPart
+				or (vehicle:FindFirstChild("Body") and vehicle.Body:FindFirstChild("Main"))
+			if main and main:IsA("BasePart") then
+				evaluateTarget(main, vehicle)
+			end
+		end
+	end
 
 	-- Empty vehicles... not needed yet
 	-- if RunService:IsStudio() then
@@ -563,6 +623,15 @@ function Sentry:GetNearbyTargets(range): { BasePart }
 	-- end
 
 	return nearby
+end
+
+function Sentry:CanAttack(targetPart: BasePart): boolean
+	if not targetPart.Parent then return false end
+	local damageOptions = Table.DeepCopy(self.settings.Damage)
+	damageOptions.Dealer = self.ownerVal.Value or self.model
+	damageOptions.Taker = targetPart
+	damageOptions.Metadata = { IgnoreState = true }
+	return Damage.canDamage(damageOptions)
 end
 
 function Sentry:CanSee(targetPart: BasePart): boolean
@@ -583,6 +652,7 @@ function Sentry:CanSee(targetPart: BasePart): boolean
 	end
 
 	local ancestorModel = instance:FindFirstAncestorWhichIsA("Model")
+	if not ancestorModel then return false end
 	local isDamageable = CollectionService:HasTag(ancestorModel, "Damageable")
 
 	if ancestorModel:GetAttribute("EnemyTransparency") == 1 then
@@ -636,6 +706,7 @@ function Sentry:IsInAimArc(worldPosition: Vector3): boolean
 end
 
 function Sentry:SetTarget(part: BasePart)
+	if self.destroyed then return end
 	self.target = part
 	self.targetVal.Value = part
 	if part and self.config.Enabled then
