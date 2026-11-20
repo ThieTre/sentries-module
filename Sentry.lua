@@ -627,9 +627,14 @@ end
 
 function Sentry:CanAttack(targetPart: BasePart): boolean
 	if not targetPart.Parent then return false end
+	-- Match acquisition: seated players are evaluated as their vehicle.
+	local player = Players:GetPlayerFromCharacter(targetPart.Parent)
+	local humanoid = player and PlayerUtils.getObjects(player, "Humanoid")
+	local seatPart = humanoid and humanoid.SeatPart
+	local vehicle = seatPart and InstSearch.findFirstAncestorTagged(seatPart, "Vehicle")
 	local damageOptions = Table.DeepCopy(self.settings.Damage)
 	damageOptions.Dealer = self.ownerVal.Value or self.model
-	damageOptions.Taker = targetPart
+	damageOptions.Taker = vehicle or player or targetPart
 	damageOptions.Metadata = { IgnoreState = true }
 	return Damage.canDamage(damageOptions)
 end
